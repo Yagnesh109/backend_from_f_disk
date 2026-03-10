@@ -6,7 +6,7 @@ from os import getenv
 import requests
 
 GEMINI_API_KEY = getenv("GEMINI_API_KEY")
-GEMINI_MODEL = getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = "gemini-2.5-flash"
 GEMINI_API_VERSION = getenv("GEMINI_API_VERSION", "v1").strip() or "v1"
 OPENROUTER_API_KEY = getenv("OPENROUTER_API_KEY")
 OPENROUTER_MODEL = getenv("OPENROUTER_MODEL", "google/gemini-2.0-flash")
@@ -236,30 +236,29 @@ def extract_medicine_details_from_image(image_bytes, mime_type):
     safe_mime = _normalized_mime_type(mime_type)
 
     prompt = (
-        "Extract ALL medicine schedule entries from this prescription/medicine image. "
-        "Return only JSON in this exact shape: "
+        "Extract EVERY medicine on this prescription/medicine image. "
+        "Return ONLY JSON in this exact shape: "
         '{"medicines":[{"medicineName":"","dosage":"","startDate":"","endDate":"",'
         '"time":"","mealType":"","mealRelation":""}]}'
-        " Include every distinct medicine on the page. "
-        "Date format must be YYYY-MM-DD when available. "
-        "Time format should be HH:MM (24-hour) when available. "
-        "mealType must be one of Breakfast, Lunch, Dinner. "
-        "mealRelation must be one of Before Meal, After Meal. "
-        "Use empty string for unavailable fields."
+        " - One array element per distinct medicine (do NOT merge multiple medicines into one item)."
+        " - Preserve order from top to bottom/left to right on the page."
+        " - Date format: YYYY-MM-DD when visible; else empty string."
+        " - Time format: HH:MM (24-hour). If multiple times, return comma-separated list."
+        " - mealType must be Breakfast, Lunch, or Dinner."
+        " - mealRelation must be Before Meal or After Meal."
+        " - Use empty string for any missing field."
+        "Example output for three medicines: {\"medicines\":[{\"medicineName\":\"A\",\"dosage\":\"1-0-1\","
+        "\"startDate\":\"2026-03-10\",\"endDate\":\"2026-03-14\",\"time\":\"08:00, 20:00\","
+        "\"mealType\":\"Breakfast\",\"mealRelation\":\"After Meal\"},{\"medicineName\":\"B\",\"dosage\":\"0-1-0\","
+        "\"startDate\":\"\",\"endDate\":\"\",\"time\":\"14:00\",\"mealType\":\"Lunch\","
+        "\"mealRelation\":\"Before Meal\"},{\"medicineName\":\"C\",\"dosage\":\"1-0-0\",\"startDate\":\"\","
+        "\"endDate\":\"\",\"time\":\"08:00\",\"mealType\":\"Breakfast\",\"mealRelation\":\"After Meal\"}]}"
     )
 
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
-    # Try OpenRouter first if configured. If it succeeds, return immediately.
-    # If it fails, fall back to Gemini instead of bubbling the OpenRouter error.
+    # Force Gemini 2.5 Flash; no OpenRouter or other model fallbacks.
     last_error = None
-    if OPENROUTER_API_KEY:
-        or_result = _call_openrouter(prompt, image_b64, safe_mime)
-        if or_result and not or_result.get("error"):
-            return or_result
-        if or_result and or_result.get("error"):
-            last_error = f"OpenRouter: {or_result.get('error')}"
-
     if not GEMINI_API_KEY:
         return {"error": "GEMINI_API_KEY is not configured on backend."}
 
@@ -279,7 +278,7 @@ def extract_medicine_details_from_image(image_bytes, mime_type):
         ],
         "generationConfig": {
             "temperature": 0.2,
-            "maxOutputTokens": 512,
+            "maxOutputTokens": 1024,
             # responseMimeType is only supported on v1; for v1beta we strip it below.
             "responseMimeType": "application/json",
         },
@@ -295,7 +294,7 @@ def extract_medicine_details_from_image(image_bytes, mime_type):
 
     for api_version in api_versions:
         available = _try_list_models(api_version, GEMINI_API_KEY)
-        model_to_use = _pick_fallback_model(available, GEMINI_MODEL)
+        model_to_use = GEMINI_MODEL
 
         # Build payload per version: drop responseMimeType for v1beta to avoid API errors,
         # but keep it for v1 to encourage structured JSON.
