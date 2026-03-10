@@ -250,12 +250,15 @@ def extract_medicine_details_from_image(image_bytes, mime_type):
 
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
-    # Try OpenRouter first if configured. If it returns anything (ok or error),
-    # stop and return that result to avoid falling back to Gemini quotas.
+    # Try OpenRouter first if configured. If it succeeds, return immediately.
+    # If it fails, fall back to Gemini instead of bubbling the OpenRouter error.
+    last_error = None
     if OPENROUTER_API_KEY:
         or_result = _call_openrouter(prompt, image_b64, safe_mime)
-        if or_result:
+        if or_result and not or_result.get("error"):
             return or_result
+        if or_result and or_result.get("error"):
+            last_error = f"OpenRouter: {or_result.get('error')}"
 
     if not GEMINI_API_KEY:
         return {"error": "GEMINI_API_KEY is not configured on backend."}
@@ -290,7 +293,6 @@ def extract_medicine_details_from_image(image_bytes, mime_type):
     if GEMINI_API_VERSION != "v1beta":
         api_versions.append("v1beta")
 
-    last_error = None
     for api_version in api_versions:
         available = _try_list_models(api_version, GEMINI_API_KEY)
         model_to_use = _pick_fallback_model(available, GEMINI_MODEL)
