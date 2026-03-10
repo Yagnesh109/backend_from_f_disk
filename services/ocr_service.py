@@ -128,9 +128,11 @@ def _call_openrouter(prompt, image_b64, mime_type):
     # Ask explicitly for JSON only.
     system_prompt = (
         "You are an OCR parser. Given an image of a prescription or medicine label, "
-        "return ONLY a compact JSON object with keys: "
-        "medicineName, dosage, startDate, endDate, time, mealType, mealRelation. "
-        "Do not include code fences or extra text."
+        "return ONLY JSON in this shape: "
+        '{"medicines":[{"medicineName":"","dosage":"","startDate":"","endDate":"",'
+        '"time":"","mealType":"","mealRelation":""}]}'
+        " Extract every distinct medicine appearing in the image; include start/end "
+        "dates and dosing time when visible. Do not include code fences or extra text."
     )
 
     payload = {
@@ -177,18 +179,15 @@ def _call_openrouter(prompt, image_b64, mime_type):
         return {"error": "OpenRouter returned no choices."}
     content = choices[0].get("message", {}).get("content", "")
     parsed = _extract_json_from_text(content)
-    if not parsed or not isinstance(parsed, dict):
+    if not parsed:
         return {"error": "Could not parse structured JSON from OpenRouter response."}
 
-    return {
-        "medicineName": str(parsed.get("medicineName", "")).strip(),
-        "dosage": str(parsed.get("dosage", "")).strip(),
-        "startDate": str(parsed.get("startDate", "")).strip(),
-        "endDate": str(parsed.get("endDate", "")).strip(),
-        "time": str(parsed.get("time", "")).strip(),
-        "mealType": str(parsed.get("mealType", "")).strip(),
-        "mealRelation": str(parsed.get("mealRelation", "")).strip(),
-    }
+    items = _parse_items(parsed)
+    if not items:
+        return {"error": "No medicine entries found in OpenRouter response."}
+
+    first = items[0]
+    return {**first, "items": items}
 
 
 def _normalized_mime_type(mime_type, filename=None):
@@ -202,13 +201,46 @@ def _normalized_mime_type(mime_type, filename=None):
     return "image/jpeg"
 
 
+def _normalize_item(item):
+    def _string_field(value):
+        if value is None:
+            return ""
+        if isinstance(value, (list, tuple)):
+            # Join multiple timings/values into a single string the mobile app can parse.
+            return ", ".join([str(v).strip() for v in value if str(v).strip()])
+        return str(value).strip()
+
+    return {
+        "medicineName": _string_field(item.get("medicineName")),
+        "dosage": _string_field(item.get("dosage")),
+        "startDate": _string_field(item.get("startDate")),
+        "endDate": _string_field(item.get("endDate")),
+        "time": _string_field(item.get("time")),
+        "mealType": _string_field(item.get("mealType")),
+        "mealRelation": _string_field(item.get("mealRelation")),
+    }
+
+
+def _parse_items(parsed):
+    items = []
+    if isinstance(parsed, list):
+        items = [_normalize_item(x) for x in parsed if isinstance(x, dict)]
+    elif isinstance(parsed, dict) and isinstance(parsed.get("medicines"), list):
+        items = [_normalize_item(x) for x in parsed.get("medicines") if isinstance(x, dict)]
+    elif isinstance(parsed, dict):
+        items = [_normalize_item(parsed)]
+    return items
+
+
 def extract_medicine_details_from_image(image_bytes, mime_type):
     safe_mime = _normalized_mime_type(mime_type)
 
     prompt = (
-        "Extract medicine schedule information from this prescription/medicine image. "
-        "Return only valid JSON object with exactly these keys: "
-        "medicineName, dosage, startDate, endDate, time, mealType, mealRelation. "
+        "Extract ALL medicine schedule entries from this prescription/medicine image. "
+        "Return only JSON in this exact shape: "
+        '{"medicines":[{"medicineName":"","dosage":"","startDate":"","endDate":"",'
+        '"time":"","mealType":"","mealRelation":""}]}'
+        " Include every distinct medicine on the page. "
         "Date format must be YYYY-MM-DD when available. "
         "Time format should be HH:MM (24-hour) when available. "
         "mealType must be one of Breakfast, Lunch, Dinner. "
@@ -310,28 +342,7 @@ def extract_medicine_details_from_image(image_bytes, mime_type):
             )
             continue
 
-        def _normalize_item(item):
-            return {
-                "medicineName": str(item.get("medicineName", "")).strip(),
-                "dosage": str(item.get("dosage", "")).strip(),
-                "startDate": str(item.get("startDate", "")).strip(),
-                "endDate": str(item.get("endDate", "")).strip(),
-                "time": str(item.get("time", "")).strip(),
-                "mealType": str(item.get("mealType", "")).strip(),
-                "mealRelation": str(item.get("mealRelation", "")).strip(),
-            }
-
-        items = []
-        if isinstance(parsed, list):
-            items = [_normalize_item(x) for x in parsed if isinstance(x, dict)]
-        elif isinstance(parsed, dict) and isinstance(parsed.get("medicines"), list):
-            items = [
-                _normalize_item(x)
-                for x in parsed.get("medicines")
-                if isinstance(x, dict)
-            ]
-        elif isinstance(parsed, dict):
-            items = [_normalize_item(parsed)]
+        items = _parse_items(parsed)
 
         if not items:
             last_error = (
